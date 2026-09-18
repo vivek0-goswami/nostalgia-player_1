@@ -55,6 +55,23 @@ export function YouTubePlayerProvider({
   const [currentTrackIndex, setCurrentTrackIndex] = useState(0);
   const [playlist, setPlaylistState] = useState<Track[]>([]);
 
+  // FIX: Keep a ref that always has the LATEST playlist and index.
+  // The YouTube player's event callbacks are registered once at
+  // construction time, so they close over whatever `playlist` and
+  // `currentTrackIndex` were AT THAT MOMENT (usually empty/0).
+  // Reading from a ref instead of the closed-over state guarantees
+  // the "onEnded" / "onError" handlers always see current data.
+  const playlistRef = useRef<Track[]>([]);
+  const currentTrackIndexRef = useRef(0);
+
+  useEffect(() => {
+    playlistRef.current = playlist;
+  }, [playlist]);
+
+  useEffect(() => {
+    currentTrackIndexRef.current = currentTrackIndex;
+  }, [currentTrackIndex]);
+
   // Initialize YouTube API
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -71,6 +88,7 @@ export function YouTubePlayerProvider({
         initializePlayer();
       };
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const initializePlayer = useCallback(() => {
@@ -96,60 +114,62 @@ export function YouTubePlayerProvider({
         disablekb: 1,
       },
     });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const onPlayerReady = useCallback(() => {
     // Player ready
   }, []);
 
-  const onPlayerStateChange = useCallback(
-    (event: YT.PlayerEvent) => {
-      const player = playerRef.current;
-      if (!player || !window.YT) return;
+  // FIX: This callback now has an EMPTY dependency array. It is
+  // created exactly once, registered exactly once with the player,
+  // and never goes stale — because instead of closing over
+  // `playlist`/`currentTrackIndex` directly, it reads them from the
+  // always-up-to-date refs declared above.
+  const onPlayerStateChange = useCallback((event: YT.PlayerEvent) => {
+    if (!window.YT) return;
 
-      if (event.data === window.YT.PlayerState.PLAYING) {
-        setState((prev) => ({ ...prev, isPlaying: true }));
-      } else if (event.data === window.YT.PlayerState.PAUSED) {
+    if (event.data === window.YT.PlayerState.PLAYING) {
+      setState((prev) => ({ ...prev, isPlaying: true }));
+    } else if (event.data === window.YT.PlayerState.PAUSED) {
+      setState((prev) => ({ ...prev, isPlaying: false }));
+    } else if (event.data === window.YT.PlayerState.ENDED) {
+      const list = playlistRef.current;
+      const current = currentTrackIndexRef.current;
+      const next = current + 1;
+      if (next < list.length) {
+        setCurrentTrackIndex(next);
+      } else {
+        // End of playlist reached; stop "playing" state
         setState((prev) => ({ ...prev, isPlaying: false }));
-      } else if (event.data === window.YT.PlayerState.ENDED) {
-        // Move to next track
-        setCurrentTrackIndex((prev) => {
-          const next = prev + 1;
-          if (next < playlist.length) {
-            return next;
-          }
-          return prev;
-        });
       }
-    },
-    [playlist.length]
-  );
+    }
+  }, []);
 
-  const onPlayerError = useCallback(
-    (event: YT.PlayerError) => {
-      const errorCodes: { [key: number]: string } = {
-        2: "Invalid parameter",
-        5: "HTML5 player error",
-        100: "Video not found",
-        101: "Video embedding not allowed",
-        150: "Video embedding not allowed (same as 101)",
-      };
-      const errorMsg = errorCodes[event.data] || "Unknown error";
-      setState((prev) => ({ ...prev, error: errorMsg }));
+  const onPlayerError = useCallback((event: YT.PlayerError) => {
+    const errorCodes: { [key: number]: string } = {
+      2: "Invalid parameter",
+      5: "HTML5 player error",
+      100: "Video not found",
+      101: "Video embedding not allowed",
+      150: "Video embedding not allowed (same as 101)",
+    };
+    const errorMsg = errorCodes[event.data] || "Unknown error";
+    setState((prev) => ({ ...prev, error: errorMsg }));
 
-      // Skip to next track on error
-      setCurrentTrackIndex((prev) => {
-        const next = prev + 1;
-        if (next < playlist.length) {
-          return next;
-        }
-        return prev;
-      });
-    },
-    [playlist.length]
-  );
+    // Skip to next track on error — also reads from refs, so this
+    // works correctly even for playlists selected after mount.
+    const list = playlistRef.current;
+    const current = currentTrackIndexRef.current;
+    const next = current + 1;
+    if (next < list.length) {
+      setCurrentTrackIndex(next);
+    }
+  }, []);
 
-  // Update player when currentTrackIndex changes
+  // Load the current track into the player and auto-play it.
+  // This effect re-runs whenever the track index OR the playlist
+  // itself changes (e.g. user picks a different playlist).
   useEffect(() => {
     if (!playerRef.current || playlist.length === 0) return;
 
@@ -158,6 +178,7 @@ export function YouTubePlayerProvider({
       playerRef.current.loadVideoById(track.videoId);
       setState((prev) => ({
         ...prev,
+        currentTime: 0,
         duration: track.duration,
         error: null,
       }));
@@ -200,9 +221,9 @@ export function YouTubePlayerProvider({
   const nextTrack = useCallback(() => {
     setCurrentTrackIndex((prev) => {
       const next = prev + 1;
-      return next < playlist.length ? next : prev;
+      return next < playlistRef.current.length ? next : prev;
     });
-  }, [playlist.length]);
+  }, []);
 
   const prevTrack = useCallback(() => {
     setCurrentTrackIndex((prev) => (prev > 0 ? prev - 1 : 0));
